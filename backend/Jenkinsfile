@@ -1,0 +1,117 @@
+pipeline {
+    agent { label 'trishula-windows-ucrt64' }
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        skipDefaultCheckout(true)
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+    }
+
+    environment {
+        // Configure this on the Jenkins Windows agent (example: C:\\msys64).
+        MSYS2_HOME = 'C:\\msys64'
+        CPP_BUILD_DIR = 'build_jenkins'
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Toolchain Preflight') {
+            steps {
+                powershell '''
+                    $ErrorActionPreference = "Stop"
+                    Write-Host "Jenkins agent: $env:COMPUTERNAME"
+                    Write-Host "MSYS2_HOME: $env:MSYS2_HOME"
+                    if (-not (Test-Path "$env:MSYS2_HOME\\ucrt64.exe")) {
+                        throw "MSYS2 UCRT64 launcher not found at $env:MSYS2_HOME\\ucrt64.exe"
+                    }
+                    go version
+                    cmake --version
+                    & "$env:MSYS2_HOME\\ucrt64.exe" -lc "g++ --version && cmake --version && ctest --version"
+                '''
+            }
+        }
+
+        stage('C++ Configure') {
+            steps {
+                powershell '''
+                    $ErrorActionPreference = "Stop"
+                    & "$env:MSYS2_HOME\\ucrt64.exe" -lc "cmake -S . -B $env:CPP_BUILD_DIR -G 'MinGW Makefiles' -DCMAKE_BUILD_TYPE=Release"
+                    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                '''
+            }
+        }
+
+        stage('C++ Build') {
+            steps {
+                powershell '''
+                    $ErrorActionPreference = "Stop"
+                    & "$env:MSYS2_HOME\\ucrt64.exe" -lc "cmake --build $env:CPP_BUILD_DIR -j2"
+                    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                '''
+            }
+        }
+
+        stage('C++ Test') {
+            steps {
+                powershell '''
+                    $ErrorActionPreference = "Stop"
+                    & "$env:MSYS2_HOME\\ucrt64.exe" -lc "ctest --test-dir $env:CPP_BUILD_DIR --output-on-failure --output-junit ctest-results.xml"
+                    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                '''
+            }
+        }
+
+        stage('Ground Data Service') {
+            steps {
+                dir('services/ground-data-service') {
+                    powershell '''
+                        $ErrorActionPreference = "Stop"
+                        go test ./...
+                        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                        go vet ./...
+                        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                    '''
+                }
+            }
+        }
+
+        stage('Package CI Artifacts') {
+            steps {
+                powershell '''
+                    $ErrorActionPreference = "Stop"
+                    New-Item -ItemType Directory -Force -Path ci-artifacts | Out-Null
+                    if (Test-Path "$env:CPP_BUILD_DIR\\ctest-results.xml") {
+                        Copy-Item "$env:CPP_BUILD_DIR\\ctest-results.xml" "ci-artifacts\\ctest-results.xml" -Force
+                    }
+                    Copy-Item "CMakeCache.txt" "ci-artifacts\\CMakeCache.txt" -ErrorAction SilentlyContinue
+                '''
+                archiveArtifacts artifacts: 'ci-artifacts/**', allowEmptyArchive: true, fingerprint: true
+            }
+        }
+    }
+
+    post {
+        always {
+            powershell '''
+                if (Test-Path "$env:CPP_BUILD_DIR\\Testing\\Temporary\\LastTest.log") {
+                    Write-Host "CTest LastTest.log available at $env:CPP_BUILD_DIR\\Testing\\Temporary\\LastTest.log"
+                }
+            '''
+        }
+        success {
+            echo 'TRISHULA backend CI passed.'
+        }
+        failure {
+            echo 'TRISHULA backend CI failed. Existing project source was not modified by the pipeline.'
+        }
+        cleanup {
+            deleteDir()
+        }
+    }
+}

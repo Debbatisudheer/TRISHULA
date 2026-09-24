@@ -1,0 +1,79 @@
+pipeline {
+    agent { label 'trishula-windows-node' }
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        skipDefaultCheckout(true)
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Node Preflight') {
+            steps {
+                powershell '''
+                    $ErrorActionPreference = "Stop"
+                    node --version
+                    npm --version
+                '''
+            }
+        }
+
+        stage('Install Dependencies') {
+            steps {
+                powershell '''
+                    $ErrorActionPreference = "Stop"
+                    npm ci
+                '''
+            }
+        }
+
+        stage('TypeScript Validation') {
+            steps {
+                powershell '''
+                    $ErrorActionPreference = "Stop"
+                    npx tsc --noEmit
+                '''
+            }
+        }
+
+        stage('Next.js Production Build') {
+            steps {
+                powershell '''
+                    $ErrorActionPreference = "Stop"
+                    npm run build
+                '''
+            }
+        }
+
+        stage('Package UI Artifact') {
+            steps {
+                powershell '''
+                    $ErrorActionPreference = "Stop"
+                    if (-not (Test-Path .next)) {
+                        throw "Next.js production output (.next) was not created."
+                    }
+                '''
+                archiveArtifacts artifacts: '.next/**, package.json, package-lock.json', allowEmptyArchive: false, fingerprint: true
+            }
+        }
+    }
+
+    post {
+        success {
+            echo 'TRISHULA Mission Control UI CI passed.'
+        }
+        failure {
+            echo 'TRISHULA Mission Control UI CI failed. Existing project source was not modified by the pipeline.'
+        }
+        cleanup {
+            deleteDir()
+        }
+    }
+}
